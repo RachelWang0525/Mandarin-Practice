@@ -413,47 +413,141 @@ function speak(t){
 speechSynthesis.getVoices();
 speechSynthesis.onvoiceschanged=()=>{};
 
-function manualNext(){curIdx++;render();}
+function manualNext(){
+  clearRecTimer();
+  try{if(rec)rec.stop();}catch(e){}
+  isRec=false;retryCount=0;
+  curIdx++;render();
+}
 
 // ========== 语音识别 ==========
 let rec=null,isRec=false;
+let recTimer=null, retryCount=0, maxRetry=2;
+function clearRecTimer(){if(recTimer){clearTimeout(recTimer);recTimer=null;}}
 function initRec(){
   if(rec)return;
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR)return;
   rec=new SR();
   rec.lang='zh-CN';rec.interimResults=false;rec.maxAlternatives=5;
+  rec.continuous=false;
   rec.onresult=e=>{
+    clearRecTimer();
+    retryCount=0;
     const hs=[];
     for(let i=0;i<e.results[0].length;i++)hs.push(e.results[0][i].transcript.trim());
     judge(hs);
   };
-  rec.onerror=e=>{stopRec();if(e.error==='not-allowed')alert('请允许麦克风权限');};
-  rec.onend=()=>stopRec();
+  rec.onerror=e=>{
+    clearRecTimer();
+    if(e.error==='not-allowed'||e.error==='service-not-allowed'){
+      stopRec();alert('请允许麦克风权限');return;
+    }
+    // no-speech / network / aborted 等错误自动重试
+    if(retryCount<maxRetry){
+      retryCount++;
+      showResultHint(`⚠️ 没听清，自动重试 (${retryCount}/${maxRetry})...`,'no');
+      setTimeout(()=>{if(isRec){try{rec.start();startRecTimer();}catch(e){stopRec();}}},500);
+    }else{
+      showResultHint('❌ 识别超时，请再按一次重试','no');
+      stopRec();retryCount=0;
+    }
+  };
+  rec.onend=()=>{
+    clearRecTimer();
+    // 如果还在录音状态但onend被触发（比如系统自动停了），自动重启
+    if(isRec&&retryCount<maxRetry){
+      retryCount++;
+      setTimeout(()=>{
+        if(isRec){
+          try{rec.start();startRecTimer();}
+          catch(e){stopRec();}
+        }
+      },300);
+    }else{
+      isRec=false;
+      updateRecBtn();
+    }
+  };
+}
+function showResultHint(text,type){
+  const resultEl=document.getElementById('result');
+  if(!resultEl)return;
+  resultEl.className='result show '+(type==='ok'?'ok':'no');
+  resultEl.innerHTML=text;
+}
+function startRecTimer(){
+  clearRecTimer();
+  // 5秒无结果自动重试（单字短，不需要等太久）
+  recTimer=setTimeout(()=>{
+    if(isRec){
+      retryCount++;
+      if(retryCount<=maxRetry){
+        showResultHint(`⏱ 等待过久，重听中 (${retryCount}/${maxRetry})...`,'no');
+        try{rec.stop();}catch(e){}
+        // onend会自动重启
+      }else{
+        showResultHint('❌ 等太久了没识别到，请靠近麦克风再按一次','no');
+        stopRec();retryCount=0;
+      }
+    }
+  },5000);
 }
 function toggleRec(btn){
   initRec();
   if(!rec){alert('请用Chrome或Safari打开以使用语音识别');return;}
-  if(isRec){rec.stop();return;}
-  try{rec.start();isRec=true;btn.classList.add('rec');btn.textContent='🔴 请读...';document.getElementById('result').className='result';}catch(e){}
+  if(isRec){
+    // 手动停止
+    retryCount=0;clearRecTimer();
+    try{rec.stop();}catch(e){}
+    stopRec();
+    return;
+  }
+  // 开始录音
+  retryCount=0;
+  try{
+    rec.start();isRec=true;
+    btn.classList.add('rec');
+    btn.textContent='🔴 请读...（点此停止）';
+    document.getElementById('result').className='result';
+    startRecTimer();
+  }catch(e){
+    // 有时start会报"already started"错误，重置一下
+    try{rec.stop();}catch(_){}
+    setTimeout(()=>{
+      try{rec.start();isRec=true;startRecTimer();}catch(_){stopRec();}
+    },200);
+  }
 }
 function stopRec(){
   isRec=false;
+  clearRecTimer();
+  retryCount=0;
+  updateRecBtn();
+}
+function updateRecBtn(){
   const btn=document.getElementById('recBtn');
   if(btn){btn.classList.remove('rec');btn.textContent='🎙️ 再读一次';}
 }
 
 function judge(heard){
+  // 识别成功，停止录音状态和定时器
+  clearRecTimer();
+  isRec=false;
+  retryCount=0;
+  updateRecBtn();
+
   const pair=shuffled[curCat][curIdx];
   const target=pair[0];
   const resultEl=document.getElementById('result');
   const card=document.getElementById('card');
+  if(!resultEl||!card)return;
 
-  let ok=false,heardMain=heard[0]||'';
+  let ok=false,heardMain=heard[0]||'（没听清）';
   // 判断逻辑
   for(const h of heard){
+    if(!h)continue;
     if(curMode==='sentence'||pair[1].includes(' ')){
-      // 句子：只要包含目标80%以上字就算对（简单匹配）
       const tChars=target.replace(/[，。、！？\.]/g,'').split('');
       let hit=0;
       for(const c of tChars)if(h.includes(c))hit++;
@@ -480,6 +574,8 @@ function judge(heard){
   }
   save();
   renderStats();
+  // 停掉当前rec，防止onend再重启
+  try{if(rec)rec.abort&&rec.abort();}catch(e){}
   setTimeout(()=>{curIdx++;render();},ok?1200:2200);
 }
 
